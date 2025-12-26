@@ -11,23 +11,14 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
+type CrawlItem struct {
+	url   string
+	depth int
+}
+
 var seen = map[string]bool{}
 
-func filterForAnchor(baseUrl string, node *html.Node) {
-	for _, a := range node.Attr {
-		if a.Key == "href" {
-			normalized, err := normalizeLink(baseUrl, a.Val)
-			if err != nil {
-				fmt.Println("skipping url:", err)
-				return
-			}
-			if checkIfSeen(normalized) {
-				fmt.Println(normalized)
-			}
-			break
-		}
-	}
-}
+const maxDepth = 2
 
 func checkIfSeen(n string) bool {
 	if seen[n] == false {
@@ -42,6 +33,8 @@ func normalizeLink(baseUrl string, href string) (string, error) {
 		return "", fmt.Errorf("empty href")
 	}
 
+	href = strings.TrimSpace(href)
+
 	if href[0] == '#' || strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") {
 		return "", fmt.Errorf("invalid fragment or scheme")
 	}
@@ -55,6 +48,9 @@ func normalizeLink(baseUrl string, href string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid href: %w", err)
 	}
+	if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme")
+	}
 
 	resolved := base.ResolveReference(u)
 	resolved.Fragment = ""
@@ -62,11 +58,11 @@ func normalizeLink(baseUrl string, href string) (string, error) {
 	return resolved.String(), nil
 }
 
-func main() {
-	baseUrl := "https://catalogue.uci.edu"
-	resp, err := http.Get(baseUrl)
+func crawlPage(itemUrl string) []string {
+	pages := []string{}
+	resp, err := http.Get(itemUrl)
 	if err != nil {
-		panic("something went wrong")
+		return pages
 	}
 	defer resp.Body.Close()
 
@@ -78,7 +74,64 @@ func main() {
 
 	for node := range doc.Descendants() {
 		if node.Type == html.ElementNode && node.DataAtom == atom.A {
-			filterForAnchor(baseUrl, node)
+			for _, a := range node.Attr {
+				if a.Key == "href" {
+					normalized, err := normalizeLink(itemUrl, a.Val)
+					if err != nil {
+						fmt.Printf("skipping href: %q with error %v\n", a.Val, err)
+						break
+					}
+					pages = append(pages, normalized)
+					break
+				}
+			}
+		}
+	}
+	return pages
+}
+
+func main() {
+	baseUrl := "https://catalogue.uci.edu"
+
+	queue := []CrawlItem{
+		{url: baseUrl, depth: 0},
+	}
+
+	seen[baseUrl] = true
+
+	seed, err := url.Parse(baseUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	allowedHost := seed.Host
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth >= maxDepth {
+			continue
+		}
+
+		links := crawlPage(item.url)
+		for _, link := range links {
+			u, err := url.Parse(link)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			if u.Host != allowedHost {
+				continue
+			}
+
+			if !seen[link] {
+				seen[link] = true
+				queue = append(queue, CrawlItem{
+					url:   link,
+					depth: item.depth + 1,
+				})
+			}
 		}
 	}
 }
